@@ -30,8 +30,6 @@ spec:
         generateName: head-
       spec:
         restartPolicy: Never
-        imagePullSecrets:
-        - name: artifactory-codeflare-cred
 
         # This volume allocates shared memory for Ray to use for its plasma
         # object store. If you do not provide this, Ray will fall back to
@@ -42,7 +40,7 @@ spec:
             medium: Memory
         containers:
         - name: ray-node
-          image: res-wsched-team-ray-project-docker-local.artifactory.swg-devops.com/codeflare:glue_benchmark-ray1.9-s3
+          image: projectcodeflare/codeflare-glue:latest
           env:
           - name: AWS_ACCESS_KEY_ID
             valueFrom:
@@ -108,8 +106,6 @@ spec:
         generateName: worker-
       spec:
         restartPolicy: Never
-        imagePullSecrets:
-        - name: artifactory-codeflare-cred
         volumes:
         - name: dshm
           emptyDir:
@@ -117,7 +113,7 @@ spec:
         containers:
         - name: ray-node
           imagePullPolicy: Always
-          image: res-wsched-team-ray-project-docker-local.artifactory.swg-devops.com/codeflare:glue_benchmark-ray1.9-s3
+          image: projectcodeflare/codeflare-glue:latest
           env:
           - name: AWS_ACCESS_KEY_ID
             valueFrom:
