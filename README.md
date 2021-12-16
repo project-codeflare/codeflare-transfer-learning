@@ -1,12 +1,12 @@
-# Scaling transfer learning tasks using CodeFlare on OpenShift Platform
+# Scaling transfer learning tasks using CodeFlare on OpenShift Container Platform (OCP)
 
 Foundation models (e.g., BERT, GPT-3, RoBERTa) are trained on a large corpus of data and enable a wide variety of downstream tasks such as sentiment analysis, Q&A, and classification. This repository demonstrates how an enterprise can take a foundation model and run downstream tasks in a parallel manner on a Hybrid Cloud platform.
 
-We use RoBERTa as our base model and run the GLUE benchmark that consists of 10 downstream tasks, each with 10 seeds. Each of these tasks is transformed to a [`ray` task](https://docs.ray.io/en/latest/walkthrough.html) by using the `@ray.remote` annotation with a single GPU allocated for each task.
+We use RoBERTa as our base model and run the [GLUE benchmark](https://gluebenchmark.com) that consists of 10 downstream tasks, each with 10 seeds. Each of these tasks is transformed to a [`ray` task](https://docs.ray.io/en/latest/walkthrough.html) by using the `@ray.remote` annotation with a single GPU allocated for each task.
 
 ## Setting up an OpenShift cluster
 
-We assume that the user of this repoistory has an [OpenShift](https://www.redhat.com/en/technologies/cloud-computing/openshift) cluster setup with the [GPU operator](https://docs.nvidia.com/datacenter/cloud-native/). We also assume that the end user has [OpenShift CLI](https://docs.openshift.com/container-platform/4.2/cli_reference/openshift_cli/getting-started-cli.html#cli-installing-cli_cli-developer-commands) installed and have their data in an S3 compatible object storage.
+We assume that the user of this repoistory has an [OpenShift](https://www.redhat.com/en/technologies/cloud-computing/openshift) cluster setup with the [GPU operator](https://docs.nvidia.com/datacenter/cloud-native/). We also assume that the end user has [OpenShift CLI](https://docs.openshift.com/container-platform/4.2/cli_reference/openshift_cli/getting-started-cli.html#cli-installing-cli_cli-developer-commands) installed and have their data in an S3 compatible object storage. Python scripts for downloading all GLUE data are avaible [here](https://github.com/nyu-mll/GLUE-baselines#downloading-glue).
 
 ## Running glue_benchmark
 
