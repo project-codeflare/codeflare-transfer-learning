@@ -8,6 +8,21 @@ We use RoBERTa as our base model and run the [GLUE benchmark](https://gluebenchm
 
 We assume that the user of this repoistory has an [OpenShift](https://www.redhat.com/en/technologies/cloud-computing/openshift) cluster setup with the [GPU operator](https://docs.nvidia.com/datacenter/cloud-native/). We also assume that the end user has [OpenShift CLI](https://docs.openshift.com/container-platform/4.2/cli_reference/openshift_cli/getting-started-cli.html#cli-installing-cli_cli-developer-commands) installed and have their data in an S3 compatible object storage. Python scripts for downloading all GLUE data are avaible [here](https://github.com/nyu-mll/GLUE-baselines#downloading-glue).
 
+## Creating the S3 object for roberta-base and glue_data 
+
+Create the RoBERTa base model S3 object with key="roberta-base" and contents=roberta-base.tgz
+```
+- git clone https://huggingface.co/roberta-base
+- tar -czf roberta-base.tgz roberta-base
+```
+
+Create an object for the GLUE datasets with key=glue_data and contents=glue_data.tgz  
+```
+- python download_glue_data.py --data_dir glue_data --tasks all
+- tar -czf glue_data.tgz glue_data
+```
+
+
 ## Running glue_benchmark
 
 1. Log into OCP using the `oc login` command (On IBM Cloud, one can go to the menu under IAM#<your username/email>, then "Copy Login Command").  
