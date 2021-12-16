@@ -292,7 +292,7 @@ model=args.model
 gluedata=args.gluedata
 bucket=args.bucket
 tasks=args.tasks
-seeds=args.seeds
+seeds=[str(x) for x in args.seeds]
 LR=args.learning_rate
 savemodel=args.savemodel
 ray_service=args.ray
@@ -356,6 +356,8 @@ while len(complete) < len(tasks):
   complete.append(onedone)
   taskres = results[0]
   st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
+  if taskres == None:
+    logger.info(f"{st} received None result")
   logger.info(f"{st} {taskres['subtask']} took {taskres['time']:.1f}s on {taskres['hostname']} ... {len(complete)} of {len(tasks)} subtasks done")
   # copy results to someplace known from outside
   outfolder = f"/tmp/summary/{taskres['subtask']}"
