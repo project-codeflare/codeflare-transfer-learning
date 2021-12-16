@@ -8,7 +8,9 @@ We use RoBERTa as our base model and run the [GLUE benchmark](https://gluebenchm
 
 We assume that the user of this repoistory has an [OpenShift](https://www.redhat.com/en/technologies/cloud-computing/openshift) cluster setup with the [GPU operator](https://docs.nvidia.com/datacenter/cloud-native/). We also assume that the end user has [OpenShift CLI](https://docs.openshift.com/container-platform/4.2/cli_reference/openshift_cli/getting-started-cli.html#cli-installing-cli_cli-developer-commands) installed and have their data in an S3 compatible object storage. Python scripts for downloading all GLUE data are avaible [here](https://github.com/nyu-mll/GLUE-baselines#downloading-glue).
 
-## Creating the S3 object for roberta-base and glue_data 
+## Creating the S3 objects for roberta-base and glue_data 
+
+Both objects should be placed into the same S3 bucket.  
 
 Create the RoBERTa base model S3 object with key="roberta-base" and contents=roberta-base.tgz
 ```
@@ -16,7 +18,7 @@ Create the RoBERTa base model S3 object with key="roberta-base" and contents=rob
 - tar -czf roberta-base.tgz roberta-base
 ```
 
-Create an object for the GLUE datasets with key=glue_data and contents=glue_data.tgz  
+Create the S3 object for the GLUE datasets with key=glue_data and contents=glue_data.tgz  
 ```
 - python download_glue_data.py --data_dir glue_data --tasks all
 - tar -czf glue_data.tgz glue_data
