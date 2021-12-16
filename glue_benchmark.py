@@ -33,6 +33,7 @@ import re
 
 # ------------ detached ray actor: DataRefs -----------
 # pulls data from S3 and caches in Plasma for local scaleout
+# S3 credentials must be defined in the env
 
 @ray.remote
 class DataRefs:
@@ -96,10 +97,10 @@ class DataRefs:
 
 
 # -------------------- process_task -----------------  
-# process_task first checks if the application code and data are present
-#   if not, it attempts to download these from S3
-#   S3 credentials must be defined in the env
-# Then the task is run
+# process_task first checks if the glue datasets and the model to test are present
+#   if not, it calls the DataRefs actor to provide references to the data
+# Two log streams are created: a debug level stream to stdout and an info level to file
+# The results are packed into a python hashmap and returned
 
 @ray.remote(num_gpus=1)
 def process_task(dataRefs,model,gluedata,task,seed,LR,savemodel):
@@ -185,10 +186,12 @@ def process_task(dataRefs,model,gluedata,task,seed,LR,savemodel):
 
   logger.info(f"Processing task {task} seed {seed} with model {model}")
 
-  # pull run_glue.py (should not be needed when 'ray job submit' works correctly)
+  # Pull run_glue.py into local pod
+  # This code version must match the transformer version being used
   if not os.path.isfile('./run_glue.py'):
     subprocess.run(['wget', 'https://raw.githubusercontent.com/huggingface/transformers/b0892fa0e8df02d683e05e625b3903209bff362d/examples/text-classification/run_glue.py'])
-  # change location of transformer cache
+
+  # change location of transformer cache to a writable directory
   os.environ['TRANSFORMERS_CACHE'] = '/tmp/cache/'
 
   runargs = ["python","./run_glue.py"]
@@ -205,7 +208,7 @@ def process_task(dataRefs,model,gluedata,task,seed,LR,savemodel):
   runargs.extend(["--seed",seed])
   runargs.extend(["--overwrite_output_dir","--output_dir",resultdir])
 
-  # use to exclude some lines from logfile
+  # use this regex to exclude debug content from logfile
   p = re.compile(r".*(Epoch|Iteration|Evaluation): .*(s/it|it/s)].*")
 
   # finally, do the work
@@ -240,8 +243,7 @@ def OutDir(model,task,seed,LR):
 
 
 # ------------------ PackResults
-# Puts selected file info into a python hashmap
-#   and optionally puts model in plasma
+# Puts selected info, files, and optionally a reference to the generated subtask model, into a python hashmap
 
 def PackResults(model,task,seed,LR,time,savemodel):
   dir = OutDir(model,task,seed,LR)
@@ -256,7 +258,7 @@ def PackResults(model,task,seed,LR,time,savemodel):
       data = afile.read()
     taskres[os.path.basename(f)] = data
 
-  # put the model in plasma if requested
+  # put the model in plasma and reference in hashmap
   if savemodel:
     f = os.path.join(dir, "pytorch_model.bin")
     if os.path.isfile(f):
@@ -321,7 +323,7 @@ logger.info(f"ray_service: {ray_service}")
 
 # connect to ray cluster
 # when running outside of OCP, need to have a local file defining S3 credentials
-# when running in OCP the credentials need to be populated in the environment from secrets
+# when running in OCP credentials need to be populated in the environment from k8s secrets
 if os.path.isfile('./s3_env.json'):
   envdata = open('./s3_env.json',)
   s3_env = json.load(envdata)
@@ -331,23 +333,24 @@ else:
 
 data_actor_name = 'DataRefsActor'
 # check if data actor exists and create if not
+# a namespace is required to find a previously persisted actor instance
 try:
   dataRefs = ray.get_actor(data_actor_name)
   state = ray.get(dataRefs.get_state.remote())
   logger.info(f" Found actor={data_actor_name} with state {state}")
 except Exception as e:
-  #print("exception=",e)
   logger.info(f"  actor={data_actor_name} not found ... deploy it")
   dataRefs = DataRefs.options(name=data_actor_name,lifetime="detached").remote(bucket,model,gluedata)
   state = ray.get(dataRefs.get_state.remote())
   logger.info(f"  actor deployed with state {state}")
 
+# submit all subtasks at the same time
 tasks = [process_task.remote(dataRefs,model,gluedata,task,str(seed),LR,savemodel) for task in tasks for seed in seeds]
 st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
 logger.info(f"{st} Submitted {len(tasks)} subtasks")
 
 # wait for all to be done, one at a time
-# TODO handle processing exceptions
+# TODO handle remote processing exceptions
 incomplete = tasks
 complete = []
 while len(complete) < len(tasks):
@@ -359,7 +362,7 @@ while len(complete) < len(tasks):
   if taskres == None:
     logger.info(f"{st} received None result")
   logger.info(f"{st} {taskres['subtask']} took {taskres['time']:.1f}s on {taskres['hostname']} ... {len(complete)} of {len(tasks)} subtasks done")
-  # copy results to someplace known from outside
+  # copy results to a known place for access from outside pod
   outfolder = f"/tmp/summary/{taskres['subtask']}"
   subprocess.run(['mkdir', '-p', outfolder])
   for key in taskres.keys():
