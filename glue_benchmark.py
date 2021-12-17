@@ -15,7 +15,6 @@
 # limitations under the License.
 
 import os
-import os.path
 import sys
 import time
 import datetime
@@ -31,6 +30,51 @@ import logging
 import socket
 import re
 
+
+# ------------ validate S3 -----------
+# Hard to diagnose without these checks
+
+def Validate_S3(bucket,model,gluedata):
+  param = os.environ.get('AWS_ACCESS_KEY_ID')
+  if param == None:
+    status = ['ERROR','AWS_ACCESS_KEY_ID is missing from environment']
+    return False,status
+  param = os.environ.get('AWS_SECRET_ACCESS_KEY')
+  if param == None:
+    status = ['ERROR','AWS_SECRET_ACCESS_KEY is missing from environment']
+    return False,status
+  param = os.environ.get('ENDPOINT_URL')
+  if param == None:
+    status = ['ERROR','ENDPOINT_URL is missing from environment']
+    return False,status
+
+  client = boto3.client(
+    's3',
+    aws_access_key_id = os.environ.get('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key = os.environ.get('AWS_SECRET_ACCESS_KEY'),
+    endpoint_url = os.environ.get('ENDPOINT_URL')
+  )
+
+  try:
+    check = client.head_bucket(Bucket=bucket)
+  except Exception as e:
+    errmsg = f"bucket={bucket} not found"
+    return False,errmsg
+  
+  try:
+    check = client.head_object(Bucket=bucket, Key=model)
+  except Exception as e:
+    errmsg = f"object={model} not found in bucket={bucket}"
+    return False,errmsg
+
+  try:
+    check = client.head_object(Bucket=bucket, Key=gluedata)
+  except Exception as e:
+    errmsg = f"object={gluedata} not found in bucket={bucket}"
+    return False,errmsg
+
+  return True,"all good"
+  
 # ------------ detached ray actor: DataRefs -----------
 # pulls data from S3 and caches in Plasma for local scaleout
 # S3 credentials must be defined in the env
@@ -52,32 +96,34 @@ class DataRefs:
 
   # get glue_data from s3 and put it in plasma
   def cache_glue(self):
-    if self.glue_state == 'available':
+    if not self.glue_state == 'unavailable':
       return True
     print("try to get glue from s3")
     try:
       dataobject = self.client.get_object(Bucket=self.bucket, Key=self.glue_key)
       glue_data = dataobject['Body'].read()
       self.glueref = ray.put(glue_data)
-      self.glue_state = 'available'
+      self.glue_state = gluedata
       return True
     except Exception as e:
       print("Unable to retrieve/put object contents: {0}\n\n".format(e))
+      ray.actor.exit_actor()
       return False
 
   # get model_data from s3 and put it in plasma
   def cache_model(self):
-    if self.model_state == 'available':
+    if not self.model_state == 'unavailable':
       return True
     print("try to get model from s3")
     try:
       dataobject = self.client.get_object(Bucket=self.bucket, Key=self.model_key)
       model_data = dataobject['Body'].read()
       self.modelref = ray.put(model_data)
-      self.model_state = 'available'
+      self.model_state = model
       return True
     except Exception as e:
       print("Unable to retrieve/put object contents: {0}\n\n".format(e))
+      ray.actor.exit_actor()
       return False
 
   def get_glue_dataref(self):
@@ -103,7 +149,14 @@ class DataRefs:
 # The results are packed into a python hashmap and returned
 
 @ray.remote(num_gpus=1)
-def process_task(dataRefs,model,gluedata,task,seed,LR,savemodel):
+def process_task(dataRefs,bucket,model,gluedata,task,seed,LR,savemodel):
+  # check if S3 credentials are set and objects look accessible
+  rc,msg = Validate_S3(bucket,model,gluedata)
+  if not rc:
+    taskres = {}
+    taskres['ERROR'] = msg
+    return taskres
+
   # clean and recreate result directory
   resultdir = OutDir(model,task,seed,LR)
   subprocess.run(['rm', '-rf', resultdir])
@@ -345,7 +398,7 @@ except Exception as e:
   logger.info(f"  actor deployed with state {state}")
 
 # submit all subtasks at the same time
-tasks = [process_task.remote(dataRefs,model,gluedata,task,str(seed),LR,savemodel) for task in tasks for seed in seeds]
+tasks = [process_task.remote(dataRefs,bucket,model,gluedata,task,str(seed),LR,savemodel) for task in tasks for seed in seeds]
 st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
 logger.info(f"{st} Submitted {len(tasks)} subtasks")
 
@@ -358,13 +411,20 @@ while len(complete) < len(tasks):
   results = ray.get(onedone)
   complete.append(onedone)
   taskres = results[0]
+
   st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
   if taskres == None:
     logger.info(f"{st} received None result")
+    continue
+  if "ERROR" in taskres:
+    logger.info(f"{st} Fatal error: {taskres['ERROR']}")
+    sys.exit()
   logger.info(f"{st} {taskres['subtask']} took {taskres['time']:.1f}s on {taskres['hostname']} ... {len(complete)} of {len(tasks)} subtasks done")
+
   # copy results to a known place for access from outside pod
   outfolder = f"/tmp/summary/{taskres['subtask']}"
   subprocess.run(['mkdir', '-p', outfolder])
+
   for key in taskres.keys():
     if key == 'subtask' or key == 'time' or key == 'hostname':
       continue
