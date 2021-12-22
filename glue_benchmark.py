@@ -60,96 +60,108 @@ def Validate_S3(bucket,model,gluedata):
   except Exception as e:
     errmsg = f"bucket={bucket} not found"
     return False,errmsg
-  
+
   try:
     check = client.head_object(Bucket=bucket, Key=model)
   except Exception as e:
-    errmsg = f"object={model} not found in bucket={bucket}"
+    errmsg = f"key={model} not found in bucket={bucket}"
     return False,errmsg
 
   try:
     check = client.head_object(Bucket=bucket, Key=gluedata)
   except Exception as e:
-    errmsg = f"object={gluedata} not found in bucket={bucket}"
+    errmsg = f"key={gluedata} not found in bucket={bucket}"
     return False,errmsg
 
   return True,"all good"
-  
+
+
 # ------------ detached ray actor: DataRefs -----------
 # pulls data from S3 and caches in Plasma for local scaleout
 # S3 credentials must be defined in the env
 
 @ray.remote
 class DataRefs:
-  def __init__(self,bucket,model,gluedata):
-    self.glue_state = 'unavailable'
-    self.model_state = 'unavailable'
+  def __init__(self,bucket):
+    self.state = {}
+    self.refs = {}
+    self.bucket = bucket
     self.client = boto3.client(
       's3',
       aws_access_key_id = os.environ.get('AWS_ACCESS_KEY_ID'),
       aws_secret_access_key = os.environ.get('AWS_SECRET_ACCESS_KEY'),
       endpoint_url = os.environ.get('ENDPOINT_URL')
     )
-    self.bucket = bucket
-    self.model_key = model
-    self.glue_key = gluedata
 
-  # get glue_data from s3 and put it in plasma
-  def cache_glue(self):
-    if not self.glue_state == 'unavailable':
-      return True
-    print("try to get glue from s3")
+  # check if data for key is already cached
+  # if not, try to get data from s3 and put it in plasma
+  def Get_dataref(self,key):
+    if key in self.state:
+      if self.state[key] == 'Chached':
+        return self.refs[key]
+    print(f"  try to get {key} from s3")
     try:
-      dataobject = self.client.get_object(Bucket=self.bucket, Key=self.glue_key)
-      glue_data = dataobject['Body'].read()
-      self.glueref = ray.put(glue_data)
-      self.glue_state = gluedata
-      return True
+      dataobject = self.client.get_object(Bucket=self.bucket, Key=key)
+      data = dataobject['Body'].read()
+      print(f"  try to put {key} data into plasma")
+      self.refs[key] = ray.put(data)
+      self.state[key] = 'Cached'
+      return self.refs[key]
     except Exception as e:
       print("Unable to retrieve/put object contents: {0}\n\n".format(e))
-      ray.actor.exit_actor()
-      return False
-
-  # get model_data from s3 and put it in plasma
-  def cache_model(self):
-    if not self.model_state == 'unavailable':
-      return True
-    print("try to get model from s3")
-    try:
-      dataobject = self.client.get_object(Bucket=self.bucket, Key=self.model_key)
-      model_data = dataobject['Body'].read()
-      self.modelref = ray.put(model_data)
-      self.model_state = model
-      return True
-    except Exception as e:
-      print("Unable to retrieve/put object contents: {0}\n\n".format(e))
-      ray.actor.exit_actor()
-      return False
-
-  def get_glue_dataref(self):
-    if self.cache_glue():
-      return self.glueref
-    else:
+      self.state[key] = 'Failed'
       return None
 
-  def get_model_dataref(self):
-    if self.cache_model():
-      return self.modelref
-    else:
-      return None
+  def Get_state(self):
+    if 0 == len(self.state):
+      return ["empty"]
+    retstate = []
+    for key in self.state.keys():
+      retstate.append(f"{key}={self.state[key]}")
+    return(retstate)
 
-  def get_state(self):
-    return([f"glue={self.glue_state}", f"model={self.model_state}"])
+
+# ------------ Fetch data to local dir -----------
+# pulls data from S3 and caches in Plasma for local scaleout
+def Fetch_data_to_local_dir(logger,key):
+  try:
+    logger.info(f"Get {key} data from data actor")
+    time_start = time.time()
+    ref = ray.get(dataRefs.Get_dataref.remote(key))
+    if ref == None:
+      logger.warning(f"Could not get {key} data from data actor")
+      return False
+
+    dataset = ray.get(ref)
+    time_done = time.time()
+    st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
+    logger.info(f"{st} getting data length={len(dataset)} took {time_done-time_start:.2f}s")
+    tmpdata = f"/tmp/{key}.tgz"
+    f = open(tmpdata, "wb")
+    f.write(dataset)
+    f.close
+    time_start = time.time()
+    file = tarfile.open(tmpdata)
+    file.extractall('./')
+    file.close()
+    time_done = time.time()
+    st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
+    logger.info(f"{st} unpacking {key} tarfile took {time_done-time_start:.2f}s")
+    return True
+
+  except Exception as e:
+    logger.warning(f"Unable to retrieve/unpack {key} dataset: {0}".format(e))
+    return False
 
 
-# -------------------- process_task -----------------  
+# -------------------- Process_task -----------------
 # process_task first checks if the glue datasets and the model to test are present
 #   if not, it calls the DataRefs actor to provide references to the data
 # Two log streams are created: a debug level stream to stdout and an info level to file
 # The results are packed into a python hashmap and returned
 
 @ray.remote(num_gpus=1)
-def process_task(dataRefs,bucket,model,gluedata,task,seed,LR,savemodel):
+def Process_task(dataRefs,bucket,model,gluedata,task,seed,LR,savemodel):
   # check if S3 credentials are set and objects look accessible
   rc,msg = Validate_S3(bucket,model,gluedata)
   if not rc:
@@ -162,6 +174,7 @@ def process_task(dataRefs,bucket,model,gluedata,task,seed,LR,savemodel):
   subprocess.run(['rm', '-rf', resultdir])
   subprocess.run(['mkdir', '-p', resultdir])
 
+  # create console handler at DEBUG and logfile hander at INFO
   logger = logging.getLogger(__name__)
   logger.setLevel(logging.DEBUG)
   consoleHandler = logging.StreamHandler(sys.stdout)
@@ -171,69 +184,17 @@ def process_task(dataRefs,bucket,model,gluedata,task,seed,LR,savemodel):
   fileHandler.setLevel(logging.INFO)
   logger.addHandler(fileHandler)
 
-  # Check if glue data directory exists locally
+  # Reuse local glue data directory or try to create it
   if not os.path.isdir('./'+gluedata):
-    try:
-      logger.info("Get glue dataset tarball from data actor")
-      time_start = time.time()
-      ref = ray.get(dataRefs.get_glue_dataref.remote())
-      if ref == None:
-        logger.warning(f"Could not get {gluedata} tarball from data actor")
-        return None
-
-      glue_dataset = ray.get(ref)
-      time_done = time.time()
-      st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
-      logger.info(f"{st} getting tarball length={len(glue_dataset)} took {time_done-time_start:.2f}s")
-      tmpdata = f"/tmp/{gluedata}.tgz"
-      f = open(tmpdata, "wb")
-      f.write(glue_dataset)
-      f.close
-      time_start = time.time()
-      file = tarfile.open(tmpdata)
-      file.extractall('./')
-      file.close()
-      time_done = time.time()
-      st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
-      logger.info(f"{st} unpacking {gluedata}.tgz took {time_done-time_start:.2f}s")
-
-    except Exception as e:
-      logger.warning("Unable to retrieve/unpack glue dataset: {0}".format(e))
+    if not Fetch_data_to_local_dir(logger, gluedata):
       return None
-
   else:
     logger.info("Reusing previous existing glue-dataset")
 
-  # Check if model directory exists
+  # Reuse local model directory or try to create it
   if not os.path.isdir('./'+model):
-    try:
-      logger.info("Get model tarball from data actor")
-      time_start = time.time()
-      ref = ray.get(dataRefs.get_model_dataref.remote())
-      if ref == None:
-        logger.warning("Could not get {model} tarball from data actor")
-        return None
-
-      model_data = ray.get(ref)
-      time_done = time.time()
-      st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
-      logger.info(f"{st} getting tarball length={len(model_data)} took {time_done-time_start:.2f}s")
-      tmpdata = f"/tmp/{model}.tgz"
-      f = open(tmpdata, "wb")
-      f.write(model_data)
-      f.close
-      time_start = time.time()
-      file = tarfile.open(tmpdata)
-      file.extractall('./')
-      file.close()
-      time_done = time.time()
-      st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
-      logger.info(f"{st} unpacking {model}.tgz took {time_done-time_start:.2f}s")
-
-    except Exception as e:
-      logger.warning("Unable to retrieve/unpack model data: {0}".format(e))
+    if not Fetch_data_to_local_dir(logger, model):
       return None
-
   else:
     logger.info(f"Reusing {model} directory")
 
@@ -320,7 +281,8 @@ def PackResults(model,task,seed,LR,time,savemodel):
       taskres["pytorch_model.bin"] = ray.put(data)
 
   return taskres
-  
+
+
 # -------------------- MAIN ------------------
 
 parser = argparse.ArgumentParser(description='Driver for run_glue')
@@ -338,9 +300,9 @@ parser.add_argument('-t','--tasks', nargs='+',
 parser.add_argument('-s','--seeds', nargs='+', default=list(range(38,48)), action='store',
                     help="seeds to run, e.g. -s 38 39  (Default=38 39 40 41 42 43 44 45 46 47)")
 parser.add_argument('-l',"--learning_rate", default="2e-5",help="Learning Rate (Default=2e-5)")
-parser.add_argument('-M',"--savemodel", default=False,help="Save model for each task (Default=False)")
+parser.add_argument('-M',"--savemodel", action='store_true',help="Save model for each task (Default=False)")
 parser.add_argument('-r',"--ray", default="glue-cluster-ray-head:10001",help="ray_service:port")
-parser.add_argument('-v',"--verbose", default=False,help="show remote consoles (Default=False)")
+parser.add_argument('-v',"--verbose", action='store_true',help="show remote consoles (Default=False)")
 args = parser.parse_args()
 
 model=args.model
@@ -389,16 +351,16 @@ data_actor_name = 'DataRefsActor'
 # a namespace is required to find a previously persisted actor instance
 try:
   dataRefs = ray.get_actor(data_actor_name)
-  state = ray.get(dataRefs.get_state.remote())
+  state = ray.get(dataRefs.Get_state.remote())
   logger.info(f" Found actor={data_actor_name} with state {state}")
 except Exception as e:
   logger.info(f"  actor={data_actor_name} not found ... deploy it")
-  dataRefs = DataRefs.options(name=data_actor_name,lifetime="detached").remote(bucket,model,gluedata)
-  state = ray.get(dataRefs.get_state.remote())
+  dataRefs = DataRefs.options(name=data_actor_name,lifetime="detached").remote(bucket)
+  state = ray.get(dataRefs.Get_state.remote())
   logger.info(f"  actor deployed with state {state}")
 
 # submit all subtasks at the same time
-tasks = [process_task.remote(dataRefs,bucket,model,gluedata,task,str(seed),LR,savemodel) for task in tasks for seed in seeds]
+tasks = [Process_task.remote(dataRefs,bucket,model,gluedata,task,str(seed),LR,savemodel) for task in tasks for seed in seeds]
 st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
 logger.info(f"{st} Submitted {len(tasks)} subtasks")
 
