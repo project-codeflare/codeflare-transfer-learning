@@ -170,7 +170,7 @@ def Process_task(dataRefs,bucket,model,gluedata,task,seed,LR,savemodel):
     return taskres
 
   # clean and recreate result directory
-  resultdir = OutDir(model,task,seed,LR)
+  resultdir = ResultDir(model,task,seed,LR)
   subprocess.run(['rm', '-rf', resultdir])
   subprocess.run(['mkdir', '-p', resultdir])
 
@@ -250,8 +250,8 @@ def Process_task(dataRefs,bucket,model,gluedata,task,seed,LR,savemodel):
   return results
 
 
-# ------------------ Return subtask output directory name
-def OutDir(model,task,seed,LR):
+# ------------------ Return remote result directory name
+def ResultDir(model,task,seed,LR):
   taskl = task.lower()
   return f"result/{model}/{task}/lr-{LR}/{taskl}_seed-{seed}_lr-{LR}_TBATCH-32"
 
@@ -260,11 +260,14 @@ def OutDir(model,task,seed,LR):
 # Puts selected info, files, and optionally a reference to the generated subtask model, into a python hashmap
 
 def PackResults(model,task,seed,LR,time,savemodel):
-  dir = OutDir(model,task,seed,LR)
+  dir = ResultDir(model,task,seed,LR)
   files = glob(os.path.join(dir, f"eval_results_*.txt"))
   files.append(os.path.join(dir, "log.log"))
   taskres = {}
-  taskres["subtask"] = f"{task}_seed-{seed}_lr-{LR}"
+  taskres["model"] = model
+  taskres["LR"] = LR
+  taskres["task"] = task
+  taskres["seed"] = seed
   taskres["time"] = time
   taskres["hostname"] = socket.gethostname()
   for f in files:
@@ -283,8 +286,53 @@ def PackResults(model,task,seed,LR,time,savemodel):
   return taskres
 
 
-# -------------------- MAIN ------------------
+# ------------------ Return local result directory name
+def SummaryDir(model,LR,task,seed):
+  if seed == None:
+    return f"/tmp/summary/{taskres['model']}_lr-{taskres['LR']}/{taskres['task']}"
+  else:
+    return f"/tmp/summary/{taskres['model']}_lr-{taskres['LR']}/{taskres['task']}/seed-{taskres['seed']}"
 
+
+# ------------------ Best_model ----------------
+# checks if this is best model yet for task. If so delete last model and return eval score
+def Best_model(model,LR,task,seed):
+  # per task metric for evaluating best model (from Masayasu Muraoka)
+  eval_metric = {
+    "cola": "mcc", "mnli": "mnli/acc", "sst-2": "acc", "sts-b": "corr",
+    "qqp": "acc_and_f1", "qnli": "acc",  "rte": "acc", "wnli": "acc",
+    "mrpc": "f1"
+  }
+  subtasks_dir = SummaryDir(model,LR,task,None)
+  new_subtask_dir = SummaryDir(model,LR,task,seed)
+  metric = eval_metric[task.lower()]
+  grppr = "eval_"+metric+" = "
+  best_score = 0
+  bin_dirs = []
+  # scan all subtasks for this task, get new score and best previous score
+  for f in os.listdir(subtasks_dir):
+    if os.path.exists(f"{subtasks_dir}/{f}/pytorch_model.bin"):
+      bin_dirs.append(f"{subtasks_dir}/{f}/pytorch_model.bin")
+
+    with open(f"{subtasks_dir}/{f}/eval_results_{task.lower()}.txt") as fp:
+      for line in fp:
+        if line.startswith(grppr):
+          score = float(line.split(grppr)[1])
+    if f"{subtasks_dir}/{f}" == new_subtask_dir:
+      new_score = score
+    else:
+      if score > best_score:
+        best_score = score
+
+  if new_score <= best_score:
+    return False, 0
+  # remove previous best model
+  for f in bin_dirs:
+    os.remove(f)
+  return True, new_score
+
+
+# -------------------- MAIN ------------------
 parser = argparse.ArgumentParser(description='Driver for run_glue')
 parser.add_argument('-m',"--model", required=True,
                     help="S3 Key and local directory name of base model, e.g. roberta-base")
@@ -300,7 +348,7 @@ parser.add_argument('-t','--tasks', nargs='+',
 parser.add_argument('-s','--seeds', nargs='+', default=list(range(38,48)), action='store',
                     help="seeds to run, e.g. -s 38 39  (Default=38 39 40 41 42 43 44 45 46 47)")
 parser.add_argument('-l',"--learning_rate", default="2e-5",help="Learning Rate (Default=2e-5)")
-parser.add_argument('-M',"--savemodel", action='store_true',help="Save model for each task (Default=False)")
+parser.add_argument('-M',"--savemodel", action='store_true',help="Save best scoring model for each task (Default=False)")
 parser.add_argument('-r',"--ray", default="glue-cluster-ray-head:10001",help="ray_service:port")
 parser.add_argument('-v',"--verbose", action='store_true',help="show remote consoles (Default=False)")
 args = parser.parse_args()
@@ -381,26 +429,33 @@ while len(complete) < len(tasks):
   if "ERROR" in taskres:
     logger.info(f"{st} Fatal error: {taskres['ERROR']}")
     sys.exit()
-  logger.info(f"{st} {taskres['subtask']} took {taskres['time']:.1f}s on {taskres['hostname']} ... {len(complete)} of {len(tasks)} subtasks done")
+  logger.info(f"{st} {taskres['model']} lr-{taskres['LR']} {taskres['task']} seed-{taskres['seed']}"+
+              f" took {taskres['time']:.1f}s on {taskres['hostname']} ... {len(complete)} of {len(tasks)} subtasks done")
 
-  # copy results to a known place for access from outside pod
-  outfolder = f"/tmp/summary/{taskres['subtask']}"
+  # copy results to a known place for access from outside pod; Remove any leftover files
+  outfolder = SummaryDir(taskres['model'],taskres['LR'],taskres['task'],taskres['seed'])
   subprocess.run(['mkdir', '-p', outfolder])
+  subprocess.run(['rm', '-rf', outfolder+"/*"])
 
   for key in taskres.keys():
-    if key == 'subtask' or key == 'time' or key == 'hostname':
+    if key == 'model' or key == 'LR' or key == 'task' or key == 'seed' or key == 'time' or key == 'hostname':
       continue
-    f = open(outfolder+'/'+key, "wb")
     if not key == 'pytorch_model.bin':
+      f = open(outfolder+'/'+key, "wb")
       f.write(taskres[key])
-    else:
-      # get model from plasma and store locally
-      time_start = time.time()
-      plasobj = taskres[key]
-      modelbin = ray.get(plasobj)
-      del (plasobj)
-      time_pull = time.time()-time_start
-      st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
-      logger.info(f"{st}  took {time_pull:.1f}s to pull model from plasma with length={len(modelbin)}")
-      f.write(modelbin)
       f.close
+    else:
+      # check if this subtask model should be saved
+      save,score = Best_model(taskres['model'],taskres['LR'],taskres['task'],taskres['seed'])
+      if save:
+        # get model from plasma and store locally
+        time_start = time.time()
+        plasobj = taskres[key]
+        modelbin = ray.get(plasobj)
+        del (plasobj)
+        time_pull = time.time()-time_start
+        st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
+        logger.info(f"{st}   eval={score}, model pull took {time_pull:.1f}s for length={len(modelbin)}")
+        f = open(outfolder+'/'+key, "wb")
+        f.write(modelbin)
+        f.close
