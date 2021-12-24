@@ -67,11 +67,11 @@ $ oc cp glue_benchmark.py glue-cluster-head-XXXXX:/home/ray/glue
 8. Exec into the head node and run the application. For example:
 ```
 $ oc exec -it glue-cluster-head-cjgzk -- /bin/bash
-(base) 1000650000@glue-cluster-head-cjgzk:~/glue$ nohup ./glue_benchmark -b {bucket-name} -m roberta-base -t WNLI 2>&1 &
+(base) 1000650000@glue-cluster-head-cjgzk:~/glue$ nohup ./glue_benchmark -b {bucket-name} -m roberta-base -t WNLI -M &
 ```
-This will run the GLUE benchmark, a set of downstream tasks on RoBERTa base model against the WNLI task with 10 different seeds
+This will run the GLUE benchmark, a set of downstream tasks on RoBERTa base model against the WNLI task with 10 different seeds, and save the model from seed with best score.
 
-9. Monitor the progress using `nohup.out`. The evaluation results will be in `/tmp/summary`.
+9. Monitor the progress using `nohup.out`. The evaluation results, along with the remote consoles in log.log files, will be in `/tmp/summary`.
 
 10. When finished, clean up the active resources in your project:
 ```
