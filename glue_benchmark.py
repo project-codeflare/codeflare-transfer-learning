@@ -141,7 +141,7 @@ def Fetch_data_to_cache(logger,dataRefs,key):
 # ------------ Fetch data to local dir -----------
 # pulls data from Plasma and unpack in local directory
 def Fetch_data_to_local_dir(logger,dataRefs,key):
-  if not Fetch_data_to_cache(logger,key):
+  if not Fetch_data_to_cache(logger,dataRefs,key):
     return False
   try:
     time_start = time.time()
