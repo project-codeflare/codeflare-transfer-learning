@@ -34,19 +34,19 @@ import re
 # ------------ validate S3 -----------
 # Hard to diagnose without these checks
 
-def Validate_S3(bucket,model,gluedata):
+def Validate_S3(logger,bucket,model,gluedata):
   param = os.environ.get('AWS_ACCESS_KEY_ID')
   if param == None:
-    status = ['ERROR','AWS_ACCESS_KEY_ID is missing from environment']
-    return False,status
+    logger.warning("AWS_ACCESS_KEY_ID is missing from environment")
+    return False
   param = os.environ.get('AWS_SECRET_ACCESS_KEY')
   if param == None:
-    status = ['ERROR','AWS_SECRET_ACCESS_KEY is missing from environment']
-    return False,status
+    logger.warning("AWS_SECRET_ACCESS_KEY is missing from environment")
+    return False
   param = os.environ.get('ENDPOINT_URL')
   if param == None:
-    status = ['ERROR','ENDPOINT_URL is missing from environment']
-    return False,status
+    logger.warning("ENDPOINT_URL is missing from environment")
+    return False
 
   client = boto3.client(
     's3',
@@ -58,26 +58,27 @@ def Validate_S3(bucket,model,gluedata):
   try:
     check = client.head_bucket(Bucket=bucket)
   except Exception as e:
-    errmsg = f"bucket={bucket} not found"
-    return False,errmsg
+    logger.warning(f"bucket={bucket} not found")
+    return False
 
   try:
     check = client.head_object(Bucket=bucket, Key=model)
   except Exception as e:
-    errmsg = f"key={model} not found in bucket={bucket}"
-    return False,errmsg
+    logger.warning(f"key={model} not found in bucket={bucket}")
+    return False
 
   try:
     check = client.head_object(Bucket=bucket, Key=gluedata)
   except Exception as e:
-    errmsg = f"key={gluedata} not found in bucket={bucket}"
-    return False,errmsg
+    logger.warning(f"key={gluedata} not found in bucket={bucket}")
+    return False
 
-  return True,"all good"
+  return True
 
 
 # ------------ detached ray actor: DataRefs -----------
 # pulls data from S3 and caches in Plasma for local scaleout
+# returns objref for data previously cached
 # S3 credentials must be defined in the env
 
 @ray.remote
@@ -97,7 +98,7 @@ class DataRefs:
   # if not, try to get data from s3 and put it in plasma
   def Get_dataref(self,key):
     if key in self.state:
-      if self.state[key] == 'Chached':
+      if self.state[key] == 'Cached':
         return self.refs[key]
     print(f"  try to get {key} from s3")
     try:
@@ -121,15 +122,32 @@ class DataRefs:
     return(retstate)
 
 
-# ------------ Fetch data to local dir -----------
-# pulls data from S3 and caches in Plasma for local scaleout
-def Fetch_data_to_local_dir(logger,key):
+# ------------ Fetch data to cache -----------
+# Calls pulls data from S3 and caches in Plasma for local scaleout
+def Fetch_data_to_cache(logger,dataRefs,key):
   try:
-    logger.info(f"Get {key} data from data actor")
+    st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
+    logger.info(f"{st} Get {key} data reference from data actor")
+    ref = ray.get(dataRefs.Get_dataref.remote(key))
+    if ref == None:
+      logger.warning(f"Could not get {key} data reference from data actor")
+      return False
+    return True
+
+  except Exception as e:
+    logger.warning(f"Unable to retrieve {key} dataset: {0}".format(e))
+    return False
+
+# ------------ Fetch data to local dir -----------
+# pulls data from Plasma and unpack in local directory
+def Fetch_data_to_local_dir(logger,dataRefs,key):
+  if not Fetch_data_to_cache(logger,key):
+    return False
+  try:
     time_start = time.time()
     ref = ray.get(dataRefs.Get_dataref.remote(key))
     if ref == None:
-      logger.warning(f"Could not get {key} data from data actor")
+      logger.warning(f"Could not get {key} data reference from data actor")
       return False
 
     dataset = ray.get(ref)
@@ -156,19 +174,12 @@ def Fetch_data_to_local_dir(logger,key):
 
 # -------------------- Process_task -----------------
 # process_task first checks if the glue datasets and the model to test are present
-#   if not, it calls the DataRefs actor to provide references to the data
+#   if not, it requests the data to be fetched from plasma and unpacked locally
 # Two log streams are created: a debug level stream to stdout and an info level to file
 # The results are packed into a python hashmap and returned
 
 @ray.remote(num_gpus=1)
 def Process_task(dataRefs,bucket,model,gluedata,task,seed,LR,savemodel):
-  # check if S3 credentials are set and objects look accessible
-  rc,msg = Validate_S3(bucket,model,gluedata)
-  if not rc:
-    taskres = {}
-    taskres['ERROR'] = msg
-    return taskres
-
   # clean and recreate result directory
   resultdir = ResultDir(model,task,seed,LR)
   subprocess.run(['rm', '-rf', resultdir])
@@ -186,15 +197,15 @@ def Process_task(dataRefs,bucket,model,gluedata,task,seed,LR,savemodel):
 
   # Reuse local glue data directory or try to create it
   if not os.path.isdir('./'+gluedata):
-    if not Fetch_data_to_local_dir(logger, gluedata):
-      return None
+    if not Fetch_data_to_local_dir(logger, dataRefs, gluedata):
+      return ['ERROR',f"Fetch_data_to_local_dir for {gluedata} failed"]
   else:
     logger.info("Reusing previous existing glue-dataset")
 
   # Reuse local model directory or try to create it
   if not os.path.isdir('./'+model):
-    if not Fetch_data_to_local_dir(logger, model):
-      return None
+    if not Fetch_data_to_local_dir(logger, dataRefs, model):
+      return ['ERROR',f"Fetch_data_to_local_dir for {model} failed"]
   else:
     logger.info(f"Reusing {model} directory")
 
@@ -385,18 +396,16 @@ logger.info(f"savemodel: {savemodel}")
 logger.info(f"ray_service: {ray_service}")
 
 # connect to ray cluster
-# when running outside of OCP, need to have a local file defining S3 credentials
-# when running in OCP credentials need to be populated in the environment from k8s secrets
-if os.path.isfile('./s3_env.json'):
-  envdata = open('./s3_env.json',)
-  s3_env = json.load(envdata)
-  ray.init("ray://"+ray_service,runtime_env=s3_env,log_to_driver=verbose,namespace="ibm-glue")
-else:
-  ray.init("ray://"+ray_service,log_to_driver=verbose,namespace="ibm-glue")
+ray.init("ray://"+ray_service,log_to_driver=verbose,namespace="ibm-glue")
+
+# check if S3 credentials are set and objects look accessible
+if not Validate_S3(logger,bucket,model,gluedata):
+  logger.error(f"Fatal error verifying S3 access to specified objects")
+  sys.exit()
 
 data_actor_name = 'DataRefsActor'
-# check if data actor exists and create if not
-# a namespace is required to find a previously persisted actor instance
+# create data actor if not yet exists
+# namespace is required to find a previously persisted actor instance
 try:
   dataRefs = ray.get_actor(data_actor_name)
   state = ray.get(dataRefs.Get_state.remote())
@@ -405,7 +414,11 @@ except Exception as e:
   logger.info(f"  actor={data_actor_name} not found ... deploy it")
   dataRefs = DataRefs.options(name=data_actor_name,lifetime="detached").remote(bucket)
   state = ray.get(dataRefs.Get_state.remote())
-  logger.info(f"  actor deployed with state {state}")
+
+# make sure required datasets are cached in actor
+if not Fetch_data_to_cache(logger,dataRefs,gluedata) or not Fetch_data_to_cache(logger,dataRefs,model):
+  logger.error(f"Fatal error caching dataset from S3")
+  sys.exit()
 
 # submit all subtasks at the same time
 tasks = [Process_task.remote(dataRefs,bucket,model,gluedata,task,str(seed),LR,savemodel) for task in tasks for seed in seeds]
@@ -423,14 +436,17 @@ while len(complete) < len(tasks):
   taskres = results[0]
 
   st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
-  if taskres == None:
-    logger.info(f"{st} received None result")
-    continue
   if "ERROR" in taskres:
-    logger.info(f"{st} Fatal error: {taskres['ERROR']}")
+    logger.error(f"{st} Fatal error: {taskres['ERROR']}")
     sys.exit()
-  logger.info(f"{st} {taskres['model']} lr-{taskres['LR']} {taskres['task']} seed-{taskres['seed']}"+
-              f" took {taskres['time']:.1f}s on {taskres['hostname']} ... {len(complete)} of {len(tasks)} subtasks done")
+
+  # check for valid result
+  if any(x.startswith('eval_results') for x in taskres):
+    logger.info(f"{st} {taskres['model']} lr-{taskres['LR']} {taskres['task']} seed-{taskres['seed']}"+
+                f" took {taskres['time']:.1f}s on {taskres['hostname']} ... {len(complete)} of {len(tasks)} subtasks done")
+  else:
+    logger.error(f"{st} {taskres['model']} lr-{taskres['LR']} {taskres['task']} seed-{taskres['seed']}"+
+                f" returned ERROR ... {len(complete)} of {len(tasks)} subtasks done")
 
   # copy results to a known place for access from outside pod; Remove any leftover files
   outfolder = SummaryDir(taskres['model'],taskres['LR'],taskres['task'],taskres['seed'])
