@@ -117,8 +117,8 @@ class DataRefs:
     return self.state
 
 
-# ------------ Fetch data to cache -----------
-# Calls pulls data from S3 and caches in Plasma for local scaleout
+# ------------ Fetch dataref into plasma -----------
+# Calls actor to get objref of S3 data cached in Plasma
 def Fetch_data_to_cache(logger,dataRefs,key):
   try:
     st = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
@@ -326,10 +326,11 @@ def Best_model(model,LR,task,seed):
           score = float(line.split(grppr)[1])
     if f"{subtasks_dir}/{f}" == new_subtask_dir:
       new_score = score
-    if score > best_score:
-      best_score = score
+    else:
+      if score > best_score:
+        best_score = score
 
-  if new_score < best_score:
+  if new_score <= best_score:
     return False, 0
   # remove previous best model
   for f in bin_dirs:
@@ -348,7 +349,7 @@ def Check_for_previous_models(model,LR,tasks):
     # scan all subtasks for this task and see if there are completed subtasks but no models saved
     if any (os.path.exists(f"{subtasks_dir}/{f}/eval_results_{task.lower()}.txt") for f in os.listdir(subtasks_dir)):
       if not any (os.path.exists(f"{subtasks_dir}/{f}/pytorch_model.bin") for f in os.listdir(subtasks_dir)):
-        logger.warning(f"WARNING: completed subtasks for {task} exist but no previous models saved. No new model may be saved.")
+        logger.warning(f"WARNING: completed subtasks for {task} exist but no previous models saved. May not save best/any model.")
   return
 
 
