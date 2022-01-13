@@ -114,12 +114,7 @@ class DataRefs:
       return None
 
   def Get_state(self):
-    if 0 == len(self.state):
-      return ["empty"]
-    retstate = []
-    for key in self.state.keys():
-      retstate.append(f"{key}={self.state[key]}")
-    return(retstate)
+    return self.state
 
 
 # ------------ Fetch data to cache -----------
@@ -300,9 +295,9 @@ def PackResults(model,task,seed,LR,time,savemodel):
 # ------------------ Return local result directory name
 def SummaryDir(model,LR,task,seed):
   if seed == None:
-    return f"/tmp/summary/{taskres['model']}_lr-{taskres['LR']}/{taskres['task']}"
+    return f"/tmp/summary/{model}_lr-{LR}/{task}"
   else:
-    return f"/tmp/summary/{taskres['model']}_lr-{taskres['LR']}/{taskres['task']}/seed-{taskres['seed']}"
+    return f"/tmp/summary/{model}_lr-{LR}/{task}/seed-{seed}"
 
 
 # ------------------ Best_model ----------------
@@ -331,16 +326,30 @@ def Best_model(model,LR,task,seed):
           score = float(line.split(grppr)[1])
     if f"{subtasks_dir}/{f}" == new_subtask_dir:
       new_score = score
-    else:
-      if score > best_score:
-        best_score = score
+    if score > best_score:
+      best_score = score
 
-  if new_score <= best_score:
+  if new_score < best_score:
     return False, 0
   # remove previous best model
   for f in bin_dirs:
     os.remove(f)
   return True, new_score
+
+
+# ------------------ Save models = true, Check for previous saved models ----------------
+# checks if there are any specified tasks having previous subtasks with no models saved
+# if this is the case no new score may be the best score and no new model would be saved
+def Check_for_previous_models(model,LR,tasks):
+  for task in tasks:
+    subtasks_dir = SummaryDir(model,LR,task,None)
+    if not os.path.exists(subtasks_dir):
+      continue
+    # scan all subtasks for this task and see if there are completed subtasks but no models saved
+    if any (os.path.exists(f"{subtasks_dir}/{f}/eval_results_{task.lower()}.txt") for f in os.listdir(subtasks_dir)):
+      if not any (os.path.exists(f"{subtasks_dir}/{f}/pytorch_model.bin") for f in os.listdir(subtasks_dir)):
+        logger.warning(f"WARNING: completed subtasks for {task} exist but no previous models saved. No new model may be saved.")
+  return
 
 
 # -------------------- MAIN ------------------
@@ -395,6 +404,10 @@ logger.info(f"learning_rate: {float(LR)}")
 logger.info(f"savemodel: {savemodel}")
 logger.info(f"ray_service: {ray_service}")
 
+# if savemodel=True, check if there are saved subtasks with no saved model and warn user
+if savemodel == True:
+  Check_for_previous_models(model,LR,tasks)
+
 # connect to ray cluster
 ray.init("ray://"+ray_service,log_to_driver=verbose,namespace="ibm-glue")
 
@@ -413,10 +426,15 @@ try:
 except Exception as e:
   logger.info(f"  actor={data_actor_name} not found ... deploy it")
   dataRefs = DataRefs.options(name=data_actor_name,lifetime="detached").remote(bucket)
-  state = ray.get(dataRefs.Get_state.remote())
 
 # make sure required datasets are cached in actor
-if not Fetch_data_to_cache(logger,dataRefs,gluedata) or not Fetch_data_to_cache(logger,dataRefs,model):
+actorstate = ray.get(dataRefs.Get_state.remote())
+gluecached = modelcached = True
+if not actorstate.get(gluedata) == 'Cached':
+  gluecached = Fetch_data_to_cache(logger,dataRefs,gluedata)
+if not actorstate.get(model) == 'Cached':
+  modelcached = Fetch_data_to_cache(logger,dataRefs,model)
+if not gluecached or not modelcached:
   logger.error(f"Fatal error caching dataset from S3")
   sys.exit()
 
