@@ -28,7 +28,7 @@ roleRef:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: ray-operator-pod
+  name: glue-operator-pod
 spec:
   serviceAccountName: ray-operator-serviceaccount
   containers:
