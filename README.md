@@ -58,10 +58,10 @@ $ oc apply -f glue-operator.yaml
  $ oc apply -f glue-cluster.yaml 
 ```
 
-7. When the `ray` cluster head and worker pods are in ready state, copy the application driver to the head node:
+7. If the container images are not cached on OCP nodes they will be pulled; this can take 5-10 minutes or more. When the `ray` cluster head and worker pods are in ready state, copy the application driver to the head node:
 ```
 $ oc get po --watch
-$ oc cp glue_benchmark.py glue-cluster-head-XXXXX:/home/ray/glue
+$ oc cp glue_benchmark.py glue-cluster-head-XXXXX:/home/ray/glue/
 ```
 
 8. Exec into the head node and run the application. For example:
@@ -69,9 +69,9 @@ $ oc cp glue_benchmark.py glue-cluster-head-XXXXX:/home/ray/glue
 $ oc exec -it glue-cluster-head-cjgzk -- /bin/bash
 (base) 1000650000@glue-cluster-head-cjgzk:~/glue$ nohup ./glue_benchmark -b {bucket-name} -m roberta-base -t WNLI -M &
 ```
-This will run the GLUE benchmark, a set of downstream tasks on RoBERTa base model against the WNLI task with 10 different seeds, and save the model from seed with best score.
+This will run the GLUE benchmark, a set of downstream tasks on RoBERTa base model against the WNLI task with 10 different seeds, and save the model from the seed with best score. Before the compution starts, GLUE datasets and base model must be loaded into each worker node. Data loading is a two step process: first the S3 objects are pulled and cached locally in plasma, and then each worker pulls the data from plasma and unpacks it in its local filesystem. Additional processing with the same cluster will reuse the local data.
 
-9. Monitor the progress using `nohup.out`. The evaluation results, along with the remote consoles in log.log files, will be in `/tmp/summary`.
+9. Monitor progress using `nohup.out`. The evaluation results, along with the remote consoles in log.log files, will be in `/tmp/summary`.
 
 10. When finished, clean up the active resources in your project:
 ```
