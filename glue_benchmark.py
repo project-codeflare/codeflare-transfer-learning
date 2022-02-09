@@ -417,14 +417,15 @@ if not Validate_S3(logger,bucket,model,gluedata):
   logger.error(f"Fatal error verifying S3 access to specified objects")
   sys.exit()
 
-data_actor_name = 'DataRefsActor'
 # create data actor if not yet exists
 # namespace is required to find a previously persisted actor instance
-try:
+data_actor_name = 'DataRefsActor'
+names = ray.util.list_named_actors()
+if any(x == data_actor_name for x in names):
   dataRefs = ray.get_actor(data_actor_name)
   state = ray.get(dataRefs.Get_state.remote())
   logger.info(f" Found actor={data_actor_name} with state {state}")
-except Exception as e:
+else:
   logger.info(f"  actor={data_actor_name} not found ... deploy it")
   dataRefs = DataRefs.options(name=data_actor_name,lifetime="detached").remote(bucket)
 
