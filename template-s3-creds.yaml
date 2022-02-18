@@ -7,5 +7,6 @@ type: Opaque
 data:
   AWS_ACCESS_KEY_ID: {printf $REAL_AWS_ACCESS_KEY_ID | base64 -w 0}
   AWS_SECRET_ACCESS_KEY: {printf $REAL_AWS_SECRET_ACCESS_KEY | base64 -w 0}
+#if the object store is on AWS, leave the ENDPOINT_URL value empty
 stringData:
   ENDPOINT_URL: {REAL_ENDPOINT_URL}

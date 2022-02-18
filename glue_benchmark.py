@@ -44,16 +44,20 @@ def Validate_S3(logger,bucket,model,gluedata):
     logger.warning("AWS_SECRET_ACCESS_KEY is missing from environment")
     return False
   param = os.environ.get('ENDPOINT_URL')
-  if param == None:
-    logger.warning("ENDPOINT_URL is missing from environment")
-    return False
-
-  client = boto3.client(
-    's3',
-    aws_access_key_id = os.environ.get('AWS_ACCESS_KEY_ID'),
-    aws_secret_access_key = os.environ.get('AWS_SECRET_ACCESS_KEY'),
-    endpoint_url = os.environ.get('ENDPOINT_URL')
-  )
+  if param == "":
+    logger.warning("ENDPOINT_URL is empty, assuming AWS object store")
+    client = boto3.client(
+      's3',
+      aws_access_key_id = os.environ.get('AWS_ACCESS_KEY_ID'),
+      aws_secret_access_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+    )
+  else:
+    client = boto3.client(
+      's3',
+      aws_access_key_id = os.environ.get('AWS_ACCESS_KEY_ID'),
+      aws_secret_access_key = os.environ.get('AWS_SECRET_ACCESS_KEY'),
+      endpoint_url = os.environ.get('ENDPOINT_URL')
+    )
 
   try:
     check = client.head_bucket(Bucket=bucket)
@@ -87,12 +91,20 @@ class DataRefs:
     self.state = {}
     self.refs = {}
     self.bucket = bucket
-    self.client = boto3.client(
-      's3',
-      aws_access_key_id = os.environ.get('AWS_ACCESS_KEY_ID'),
-      aws_secret_access_key = os.environ.get('AWS_SECRET_ACCESS_KEY'),
-      endpoint_url = os.environ.get('ENDPOINT_URL')
-    )
+    param = os.environ.get('ENDPOINT_URL')
+    if param == "":
+      self.client = boto3.client(
+        's3',
+        aws_access_key_id = os.environ.get('AWS_ACCESS_KEY_ID'),
+        aws_secret_access_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+      )
+    else:
+      self.client = boto3.client(
+        's3',
+        aws_access_key_id = os.environ.get('AWS_ACCESS_KEY_ID'),
+        aws_secret_access_key = os.environ.get('AWS_SECRET_ACCESS_KEY'),
+        endpoint_url = os.environ.get('ENDPOINT_URL')
+      )
 
   # check if data for key is already cached
   # if not, try to get data from s3 and put it in plasma
