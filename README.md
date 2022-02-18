@@ -34,7 +34,8 @@ Create the S3 object for the GLUE datasets with key=glue_data and contents=glue_
 $ oc project {your-namespace}
 ```
 
-3. Use provided `template-s3-creds.yaml` and create a personal `yaml` secrets file with your namespace and S3 credentials. Then register the secrets:
+3. Use provided `template-s3-creds.yaml` and create a personal `yaml` secrets file with your namespace and S3 credentials. Note that to use AWS S3 storage, the value for ENDPOINT_URL should be empty. The program `simple_check_s3.py` can be used to validate S3 access from the head node.  
+Then register the secrets:
 ```
 $ oc create -f {your-handle}-s3-creds.yaml
 ```
