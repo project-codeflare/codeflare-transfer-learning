@@ -1,6 +1,6 @@
-# docker build -f Dockerfile -t glue-runtime:ray-1.9.0 ./
+# docker build -f Dockerfile -t glue-runtime:ray-1.12.0 ./
 
-FROM rayproject/ray:1.9.0-gpu
+FROM rayproject/ray:1.12.0-gpu
 
 RUN sudo apt-get update && sudo apt-get install -y \
     build-essential iperf \
